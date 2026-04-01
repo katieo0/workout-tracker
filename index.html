@@ -606,31 +606,45 @@
   }
 
   // ── HOME ──
+  // ── HOME ──
   async function loadHomeExercises() {
     const list = $('home-exercise-list');
     list.innerHTML = '<div class="spinner"></div>';
 
-    // Get last set per exercise (for this day)
-    const { data: sets } = await db
+    const { data: workouts, error: wErr } = await db
+      .from('workouts')
+      .select('id, date')
+      .eq('day', selectedDay)
+      .order('date', { ascending: false });
+
+    if (wErr || !workouts || workouts.length === 0) {
+      list.innerHTML = `<div class="empty-state"><p>No exercises logged for this day yet.<br>Start a workout to begin!</p></div>`;
+      return;
+    }
+
+    const workoutIds = workouts.map(w => w.id);
+    const workoutDateMap = Object.fromEntries(workouts.map(w => [w.id, w.date]));
+
+    const { data: sets, error: sErr } = await db
       .from('sets')
-      .select('*, exercises(name), workouts(date, day)')
+      .select('exercise_id, weight, reps, notes, workout_id')
+      .in('workout_id', workoutIds)
       .order('workout_id', { ascending: false });
 
-    // Build a map: exercise_id -> latest set for selected day
+    if (sErr || !sets || sets.length === 0) {
+      list.innerHTML = `<div class="empty-state"><p>No exercises logged for this day yet.<br>Start a workout to begin!</p></div>`;
+      return;
+    }
+
     const lastSet = {};
-    if (sets) {
-      for (const s of sets) {
-        if (s.workouts?.day === selectedDay && !lastSet[s.exercise_id]) {
-          lastSet[s.exercise_id] = s;
-        }
+    for (const s of sets) {
+      if (!lastSet[s.exercise_id]) {
+        lastSet[s.exercise_id] = { ...s, date: workoutDateMap[s.workout_id] };
       }
     }
 
-    const dayExercises = allExercises; // show all, highlight last used
-    const usedInDay = sets ? [...new Set(sets.filter(s => s.workouts?.day === selectedDay).map(s => s.exercise_id))] : [];
-
-    // Show exercises that have been used in this day, sorted
-    const relevant = allExercises.filter(e => usedInDay.includes(e.id));
+    const usedExerciseIds = [...new Set(sets.map(s => s.exercise_id))];
+    const relevant = allExercises.filter(e => usedExerciseIds.includes(e.id));
 
     if (relevant.length === 0) {
       list.innerHTML = `<div class="empty-state"><p>No exercises logged for this day yet.<br>Start a workout to begin!</p></div>`;
@@ -640,7 +654,7 @@
     list.innerHTML = relevant.map(ex => {
       const last = lastSet[ex.id];
       const lastText = last
-        ? `<span>${last.weight ? last.weight + ' lbs' : '—'}</span> · ${last.reps} reps · ${fmt(last.workouts.date)}`
+        ? `<span>${last.weight ? last.weight + ' lbs' : '—'}</span> · ${last.reps} reps · ${fmt(last.date)}`
         : 'No data yet';
       return `
         <div class="exercise-card">
@@ -651,7 +665,6 @@
         </div>`;
     }).join('');
   }
-
   // ── DAY PICKER ──
   document.querySelectorAll('.day-chip').forEach(chip => {
     chip.addEventListener('click', () => {
@@ -684,16 +697,25 @@
   const searchInput = $('exercise-search');
   const pickerList = $('exercise-picker-list');
 
-  async function getLastSetForExercise(exerciseId) {
-    const { data } = await db
+async function loadProgressData(exerciseId) {
+    const { data: sets } = await db
       .from('sets')
-      .select('weight, reps, notes, workouts(date)')
+      .select('weight, reps, notes, workout_id')
       .eq('exercise_id', exerciseId)
       .order('workout_id', { ascending: false })
       .limit(1);
-    return data?.[0] || null;
-  }
 
+    if (!sets || sets.length === 0) return null;
+    const s = sets[0];
+
+    const { data: workout } = await db
+      .from('workouts')
+      .select('date')
+      .eq('id', s.workout_id)
+      .single();
+
+    return { ...s, workouts: workout || {} };
+  }
   searchInput.addEventListener('input', async () => {
     const q = searchInput.value.trim().toLowerCase();
     if (!q) { pickerList.classList.remove('open'); return; }
@@ -895,22 +917,7 @@
     await loadProgressData(exerciseId);
   });
 
-  async function loadProgressData(exerciseId) {
-    $('progress-history').innerHTML = '<div class="spinner"></div>';
-
-    const { data: sets } = await db
-      .from('sets')
-      .select('weight, reps, notes, workouts(date, day)')
-      .eq('exercise_id', exerciseId)
-      .order('workout_id', { ascending: true });
-
-    if (!sets || sets.length === 0) {
-      $('chart-wrap').style.display = 'none';
-      $('progress-history').innerHTML = `<div class="empty-state"><p>No data logged for this exercise yet.</p></div>`;
-      return;
-    }
-
-    // Chart: weight over time (group by workout date, take max weight)
+  // Chart: weight over time (group by workout date, take max weight)
     const byDate = {};
     for (const s of sets) {
       const d = s.workouts.date;
