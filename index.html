@@ -606,11 +606,11 @@
   }
 
   // ── HOME ──
-  // ── HOME ──
   async function loadHomeExercises() {
     const list = $('home-exercise-list');
     list.innerHTML = '<div class="spinner"></div>';
 
+    // Step 1: get all workouts for selected day
     const { data: workouts, error: wErr } = await db
       .from('workouts')
       .select('id, date')
@@ -625,6 +625,7 @@
     const workoutIds = workouts.map(w => w.id);
     const workoutDateMap = Object.fromEntries(workouts.map(w => [w.id, w.date]));
 
+    // Step 2: get all sets for those workouts
     const { data: sets, error: sErr } = await db
       .from('sets')
       .select('exercise_id, weight, reps, notes, workout_id')
@@ -636,6 +637,7 @@
       return;
     }
 
+    // Build map: exercise_id -> most recent set
     const lastSet = {};
     for (const s of sets) {
       if (!lastSet[s.exercise_id]) {
@@ -665,6 +667,7 @@
         </div>`;
     }).join('');
   }
+
   // ── DAY PICKER ──
   document.querySelectorAll('.day-chip').forEach(chip => {
     chip.addEventListener('click', () => {
@@ -697,7 +700,7 @@
   const searchInput = $('exercise-search');
   const pickerList = $('exercise-picker-list');
 
-async function loadProgressData(exerciseId) {
+  async function getLastSetForExercise(exerciseId) {
     const { data: sets } = await db
       .from('sets')
       .select('weight, reps, notes, workout_id')
@@ -708,14 +711,15 @@ async function loadProgressData(exerciseId) {
     if (!sets || sets.length === 0) return null;
     const s = sets[0];
 
-    const { data: workout } = await db
+    const { data: workouts } = await db
       .from('workouts')
       .select('date')
       .eq('id', s.workout_id)
       .single();
 
-    return { ...s, workouts: workout || {} };
+    return { ...s, workouts: workouts || {} };
   }
+
   searchInput.addEventListener('input', async () => {
     const q = searchInput.value.trim().toLowerCase();
     if (!q) { pickerList.classList.remove('open'); return; }
@@ -917,12 +921,41 @@ async function loadProgressData(exerciseId) {
     await loadProgressData(exerciseId);
   });
 
-  // Chart: weight over time (group by workout date, take max weight)
+  async function loadProgressData(exerciseId) {
+    $('progress-history').innerHTML = '<div class="spinner"></div>';
+
+    // Step 1: get all sets for this exercise
+    const { data: sets, error: sErr } = await db
+      .from('sets')
+      .select('weight, reps, notes, workout_id')
+      .eq('exercise_id', exerciseId)
+      .order('workout_id', { ascending: true });
+
+    if (sErr || !sets || sets.length === 0) {
+      $('chart-wrap').style.display = 'none';
+      $('progress-history').innerHTML = `<div class="empty-state"><p>No data logged for this exercise yet.</p></div>`;
+      return;
+    }
+
+    // Step 2: get workout dates for those workout_ids
+    const workoutIds = [...new Set(sets.map(s => s.workout_id))];
+    const { data: workouts } = await db
+      .from('workouts')
+      .select('id, date')
+      .in('id', workoutIds);
+
+    const workoutDateMap = Object.fromEntries((workouts || []).map(w => [w.id, w.date]));
+
+    // Attach dates to sets
+    const setsWithDates = sets.map(s => ({ ...s, date: workoutDateMap[s.workout_id] }))
+      .filter(s => s.date);
+
+    // Group by date
     const byDate = {};
-    for (const s of sets) {
-      const d = s.workouts.date;
+    for (const s of setsWithDates) {
+      const d = s.date;
       if (!byDate[d]) byDate[d] = { maxWeight: 0, sets: [] };
-      if (s.weight > byDate[d].maxWeight) byDate[d].maxWeight = s.weight;
+      if ((s.weight || 0) > byDate[d].maxWeight) byDate[d].maxWeight = s.weight;
       byDate[d].sets.push(s);
     }
 
